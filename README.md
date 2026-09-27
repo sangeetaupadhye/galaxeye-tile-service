@@ -46,8 +46,8 @@ The model achieved:
 
 The evaluation set was kept separate from training.
 
-Highway and Industrial were the classes with more confusion between
-them. At 64×64 resolution, both can contain long and linear visual
+Highway and River were the classes with more confusion between them.
+At 64×64 resolution, both can contain long and linear visual
 structures, which can make them harder to distinguish.
 
 ## Setup
