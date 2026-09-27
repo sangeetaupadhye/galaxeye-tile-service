@@ -1,76 +1,239 @@
-# Tile Classification Service — Thin Slice (Part 2)
+# Tile Classification Service --- Thin Slice (Part 2)
 
-Classifies satellite tiles by land-use type (7 classes: AnnualCrop, Forest,
-Highway, Industrial, Residential, River, SeaLake) and stores each result.
-Runs fully offline at inference time.
+A small offline service for classifying satellite image tiles into 7
+land-use classes:
+
+`AnnualCrop, Forest, Highway, Industrial, Residential, River, SeaLake`
+
+The service accepts a tile image, runs the local CNN model, stores the
+prediction in SQLite, and returns the result.
 
 ## Approach
 
-- **Model:** a small CNN (4 conv blocks: 32→64→128→256 filters, BatchNorm +
-  ReLU + MaxPool each, global average pooling, dropout, ~423K parameters),
-  trained from scratch (no pretrained weights) on the 1050 labeled
-  `candidate_tiles`, using GPU in Google Colab (`galaxeye_train_cnn.ipynb`).
-- Deliberately shallow/small given the limited dataset (~150 images/class) —
-  a deeper network would overfit. Data augmentation (horizontal + vertical
-  flips, rotation, mild color jitter) compensates for limited data; flips
-  in both axes are safe since satellite tiles have no fixed "up" direction.
-- Achieved 87.9% validation accuracy and **89.5% accuracy on `eval_set`**
-  (ground truth, never touched during training).
-- Weakest classes: Highway and Industrial get confused with each other
-  more than with any other class — both are long, thin, linear features
-  that look visually similar at 64×64 resolution.
+### Model
+
+I used a small CNN trained from scratch rather than a pretrained
+ImageNet model.
+
+The model has 4 convolution blocks with:
+
+`32 → 64 → 128 → 256` filters
+
+Each block uses BatchNorm, ReLU and MaxPool, followed by global average
+pooling and a small classifier head. The model has approximately 423K
+parameters.
+
+The model was trained on the 1050 labelled `candidate_tiles` using GPU
+in Google Colab.
+
+Since the dataset is relatively small, I kept the model small and used
+data augmentation during training:
+
+-   horizontal flip
+-   vertical flip
+-   small rotation
+-   mild brightness/contrast changes
+
+The flips are reasonable for this dataset because satellite tiles do not
+have a fixed "up" direction.
+
+### Evaluation
+
+The model achieved:
+
+-   Validation accuracy: **87.9%**
+-   Evaluation-set accuracy: **89.5%**
+
+The evaluation set was kept separate from training.
+
+Highway and Industrial were the classes with more confusion between
+them. At 64×64 resolution, both can contain long and linear visual
+structures, which can make them harder to distinguish.
 
 ## Setup
 
-```bash
+Create and activate a virtual environment:
+
+``` bash
 python -m venv venv
+```
+
+On Windows Command Prompt:
+
+``` bash
 venv\Scripts\activate
+```
+
+Install the dependencies:
+
+``` bash
 pip install -r requirements.txt
 ```
 
-`artifacts_cnn/tile_cnn.pt` and `artifacts_cnn/classes.json` (the trained
-model) are already included — no training step is required to run the
-service. To retrain, use `galaxeye_train_cnn.ipynb` in Google Colab.
+The trained model files are already included:
+
+``` text
+artifacts_cnn/
+├── tile_cnn.pt
+└── classes.json
+```
+
+Therefore, no training or internet connection is required to run the
+service.
 
 ## Run
 
-```bash
+Start the FastAPI application:
+
+``` bash
 uvicorn app:app --reload
 ```
 
-Then classify a tile:
-```bash
+The API will be available at:
+
+``` text
+http://127.0.0.1:8000
+```
+
+Swagger documentation is available at:
+
+``` text
+http://127.0.0.1:8000/docs
+```
+
+## Classify a tile
+
+Using curl:
+
+``` bash
 curl -X POST http://127.0.0.1:8000/classify -F "file=@C:\path\to\some_tile.png"
 ```
 
-Results are stored in `results.db` (SQLite), table `classifications`.
+The response contains:
+
+-   prediction ID
+-   filename
+-   predicted class
+-   confidence
+-   probabilities for all seven classes
+-   model version
+
+Example:
+
+``` json
+{
+  "id": 2,
+  "filename": "tile_031.png",
+  "predicted_class": "River",
+  "confidence": 0.9864,
+  "all_class_probabilities": {
+    "AnnualCrop": 0.000008,
+    "Forest": 0.000001,
+    "Highway": 0.0135,
+    "Industrial": 0.000000,
+    "Residential": 0.000001,
+    "River": 0.9864,
+    "SeaLake": 0.000003
+  },
+  "model_version": "scratch-cnn-v1"
+}
+```
 
 ## Offline behavior
 
-The model was trained from scratch (no pretrained/downloaded weights), so
-there are zero network calls at any point — `tile_cnn.pt` loads directly
-from local disk on startup.
+The trained model and class mapping are stored locally in the
+`artifacts_cnn` directory.
 
-## What's implemented vs. stubbed
+At inference time, the service loads the model directly from local disk
+and does not call any external API or download model files.
 
-**Implemented (the required core path):**
-- `POST /classify` — full path: accept image → classify → store → return result
-- SQLite storage of every result, including full per-class probabilities
-  and a model version tag
+This allows the classification service to run on isolated hardware
+without internet access.
 
-**Deliberately stubbed / not built:**
-- No query/listing endpoints (`GET /results`, filtering by class or
-  confidence, etc.) — described in the design note, not implemented
-- No auth, no rate limiting, no batch upload
-- No automatic retraining or model-drift detection
-- No containerization/deployment config
+## What's implemented
+
+The current thin slice implements the main classification path:
+
+``` text
+Upload tile
+    ↓
+Preprocess image
+    ↓
+Run local CNN
+    ↓
+Generate prediction + probabilities
+    ↓
+Store result in SQLite
+    ↓
+Return JSON response
+```
+
+Implemented:
+
+-   `POST /classify`
+-   Image validation and preprocessing
+-   Local CNN inference
+-   Full probability output
+-   SQLite storage
+-   Model version stored with each result
+
+## Not implemented
+
+The following are intentionally outside the current thin slice:
+
+-   Query/listing endpoints
+-   Filtering historical results
+-   Authentication
+-   Rate limiting
+-   Batch upload
+-   Automatic retraining
+-   Model-drift detection
+-   Containerization/deployment configuration
+
+These are discussed as future/full-system considerations in the design
+note.
+
+## Storage
+
+Results are stored in:
+
+``` text
+results.db
+```
+
+The database contains a `classifications` table with the prediction,
+confidence, complete probability vector, model version and timestamp.
+
+The database file is created automatically when the service first stores
+a classification result.
 
 ## Files
 
-- `cnn_model.py` — CNN architecture + loading/inference wrapper
-- `artifacts_cnn/tile_cnn.pt` — trained weights
-- `artifacts_cnn/classes.json` — class name order
-- `galaxeye_train_cnn.ipynb` — Colab notebook used to train the model
-- `db.py` — SQLite schema + insert helper
-- `app.py` — the FastAPI service
-- `results.db` — created on first API request
+`app.py`
+
+FastAPI application and `/classify` endpoint.
+
+`cnn_model.py`
+
+CNN architecture, model loading and inference logic.
+
+`db.py`
+
+SQLite schema and result-storage functions.
+
+`artifacts_cnn/tile_cnn.pt`
+
+Trained CNN weights.
+
+`artifacts_cnn/classes.json`
+
+Class names used by the model.
+
+`requirements.txt`
+
+Python dependencies required to run the service.
+
+`GalaxEye Design Note — [Sangeeta_Upadhye].pdf`
+
+Part 1 design note describing the architecture, design decisions,
+assumptions and trade-offs.
